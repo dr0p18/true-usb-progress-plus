@@ -1,6 +1,8 @@
 MIT License
 
-Copyright (c) 2026 Ashen Chathuranga
+Copyright (c) 2026 Ashen Chathuranga (original project)
+Copyright (c) 2026 dr0p18 (fork modifications: target file size detection
+and progress bar/percentage)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

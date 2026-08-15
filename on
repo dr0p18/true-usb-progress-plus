@@ -1,0 +1,313 @@
+[1mdiff --git a/LICENSE b/LICENSE[m
+[1mindex 1d2df38..96fec47 100644[m
+[1m--- a/LICENSE[m
+[1m+++ b/LICENSE[m
+[36m@@ -1,6 +1,8 @@[m
+ MIT License[m
+ [m
+[31m-Copyright (c) 2026 Ashen Chathuranga[m
+[32m+[m[32mCopyright (c) 2026 Ashen Chathuranga (original project)[m
+[32m+[m[32mCopyright (c) 2026 dr0p18 (fork modifications: target file size detection[m
+[32m+[m[32mand progress bar/percentage)[m
+ [m
+ Permission is hereby granted, free of charge, to any person obtaining a copy[m
+ of this software and associated documentation files (the "Software"), to deal[m
+[1mdiff --git a/README.md b/README.md[m
+[1mindex 74d8813..5ae5f41 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -1,236 +1,43 @@[m
+[31m-# True USB Write Progress[m
+[32m+[m[32m# True USB Write Progress+[m
+ [m
+[31m-A GNOME Shell extension that monitors real-time kernel dirty-cache writes destined for removable USB block devices. It displays a top-bar indicator with live write speed and total bytes transferred, and notifies you when the flush is complete so you know exactly when a drive is safe to eject.[m
+[32m+[m[32mA fork of [true-usb-progress](https://github.com/ktauchathuranga/true-usb-progress)[m
+[32m+[m[32mby [Ashen Chathuranga](https://github.com/ktauchathuranga), which monitors[m
+[32m+[m[32mreal-time kernel dirty-cache writes to removable USB storage and shows a[m
+[32m+[m[32mtop-bar indicator until the flush is truly complete.[m
+ [m
+[31m-[![GNOME Extensions](https://img.shields.io/badge/GNOME_Extensions-Install-4A86CF?logo=gnome&logoColor=white)](https://extensions.gnome.org/extension/10082/true-usb-write-progress/)[m
+[32m+[m[32m**This fork adds:** detection of the transfer's target file size (via[m
+[32m+[m[32m`Filesystem.MountPoints` + `Gio.FileMonitor`), so the indicator can show a[m
+[32m+[m[32mreal percentage and a graphical progress bar, instead of only "N MB written".[m
+[32m+[m[32mFalls back to the original text-only display when the target size can't be[m
+[32m+[m[32mdetermined.[m
+ [m
+[31m-## The Problem[m
+[31m-[m
+[31m-When you copy files to a USB drive on Linux, the file manager often reports the operation as "complete" while the data is still sitting in the kernel's write-back cache. Ejecting the drive at this point can result in data corruption. There is no built-in visual feedback for the actual flush progress.[m
+[31m-[m
+[31m-This extension solves that by reading per-device I/O counters directly from `/sys/block/<dev>/stat` and applying heuristic filtering to distinguish real file writes from routine metadata chatter.[m
+[31m-[m
+[31m-## Compatibility[m
+[31m-[m
+[31m-| GNOME Shell | Status    |[m
+[31m-|-------------|-----------|[m
+[31m-| 45          | Supported |[m
+[31m-| 46          | Supported |[m
+[31m-| 47          | Supported |[m
+[31m-| 48          | Supported |[m
+[31m-| 49          | Supported |[m
+[31m-| 50          | Supported |[m
+[31m-[m
+[31m-Uses ESM imports (`gi://`). No legacy `imports.gi` compatibility.[m
+[32m+[m[32mA pull request with this feature was submitted upstream:[m
+[32m+[m[32mhttps://github.com/ktauchathuranga/true-usb-progress/pull/N[m
+[32m+[m[32m(link/update with the actual PR number). This fork exists as a separately[m
+[32m+[m[32minstallable extension while that PR is pending review; if/when it's merged[m
+[32m+[m[32mupstream, this fork will likely be archived in favor of the original project.[m
+ [m
+ ## Installation[m
+ [m
+[31m-### From Source[m
+[32m+[m[32m### From extensions.gnome.org[m
+ [m
+[31m-```bash[m
+[31m-# Clone the repository[m
+[31m-git clone https://github.com/ktauchathuranga/true-usb-progress.git[m
+[32m+[m[32m[Link to be added once published][m
+ [m
+[31m-# Enter the cloned repository[m
+[31m-cd true-usb-progress[m
+[32m+[m[32m### From source[m
+ [m
+[31m-# Create the extension directory[m
+[31m-mkdir -p ~/.local/share/gnome-shell/extensions/true-usb-progress@ktauchathuranga.github.io[m
+[32m+[m[32m```bash[m
+[32m+[m[32mgit clone https://github.com/dr0p18/true-usb-progress-plus.git[m
+[32m+[m[32mcd true-usb-progress-plus[m
+ [m
+[31m-# Copy extension files[m
+[32m+[m[32mmkdir -p ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io[m
+ cp extension.js metadata.json \[m
+[31m-   ~/.local/share/gnome-shell/extensions/true-usb-progress@ktauchathuranga.github.io/[m
+[32m+[m[32m   ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io/[m
+ [m
+[31m-# Restart GNOME Shell (X11: Alt+F2, type 'r', Enter)[m
+ # On Wayland: log out and log back in[m
+[31m-[m
+[31m-# Enable the extension[m
+[31m-gnome-extensions enable true-usb-progress@ktauchathuranga.github.io[m
+[31m-```[m
+[31m-[m
+[31m-### Verify Installation[m
+[31m-[m
+[31m-```bash[m
+[31m-gnome-extensions list | grep true-usb-progress[m
+[31m-gnome-extensions info true-usb-progress@ktauchathuranga.github.io[m
+[31m-```[m
+[31m-[m
+[31m-## Architecture[m
+[31m-[m
+[31m-```[m
+[31m-+---------------------+       +----------------------------+[m
+[31m-|   UDisks2 (D-Bus)   |       |  /sys/block/<dev>/stat     |[m
+[31m-|                     |       |  (kernel block-layer I/O)  |[m
+[31m-+--------+------------+       +-------------+--------------+[m
+[31m-         |                                  |[m
+[31m-         | GetManagedObjects                | readFileSync()[m
+[31m-         | InterfacesAdded/Removed          | every 2 seconds[m
+[31m-         |                                  |[m
+[31m-+--------v----------------------------------v--------------+[m
+[31m-|                                                          |[m
+[31m-|              TrueUsbProgressExtension                    |[m
+[31m-|                                                          |[m
+[31m-|  _removableDevices   Map<devName, { label }>             |[m
+[31m-|  _devStats           Map<devName, DeviceState>           |[m
+[31m-|                                                          |[m
+[31m-|  Per-device two-phase state machine:                     |[m
+[31m-|    Phase 1 (TRIGGER)  -->  Phase 2 (SUSTAIN)  -->  DONE  |[m
+[31m-|                                                          |[m
+[31m-+--------+-------------------------+-----------------------+[m
+[31m-         |                         |[m
+[31m-         v                         v[m
+[31m-  PanelMenu.Button           Main.notify()[m
+[31m-  (top-bar indicator)        ("safe to eject")[m
+[31m-```[m
+[31m-[m
+[31m-### Component Breakdown[m
+[31m-[m
+[31m-**Device Discovery (UDisks2 D-Bus)**[m
+[31m-[m
+[31m-The extension connects to the system bus and calls `GetManagedObjects` on `org.freedesktop.UDisks2` to enumerate all block devices. It filters for devices where:[m
+[31m-[m
+[31m-1. The parent `Drive` interface has `Removable == true` and `ConnectionBus == "usb"`[m
+[31m-2. The block device exposes an `org.freedesktop.UDisks2.Filesystem` interface (i.e., it is mounted)[m
+[31m-[m
+[31m-It subscribes to `InterfacesAdded` and `InterfacesRemoved` signals to dynamically track USB hotplug and mount/unmount events without polling D-Bus.[m
+[31m-[m
+[31m-**I/O Monitoring (`/sys/block/<dev>/stat`)**[m
+[31m-[m
+[31m-Every 2 seconds, the extension reads the kernel's block-layer statistics for each tracked device. The relevant fields from `/sys/block/<dev>/stat` are:[m
+[31m-[m
+[31m-| Field Index | Name              | Description                            |[m
+[31m-|-------------|-------------------|----------------------------------------|[m
+[31m-| 4           | writes completed  | Total completed write requests         |[m
+[31m-| 6           | sectors written   | Total 512-byte sectors written         |[m
+[31m-| 8           | in-flight I/Os    | Currently queued I/O operations        |[m
+[31m-[m
+[31m-Partition names (e.g., `sdb1`) are automatically resolved to parent disk names (e.g., `sdb`) since `/sys/block/` only contains whole-disk entries. This resolution handles SCSI/USB (`sdXN`), NVMe (`nvmeXnYpZ`), and MMC (`mmcblkNpM`) naming schemes.[m
+[31m-[m
+[31m-**Two-Phase Write Detection**[m
+[31m-[m
+[31m-A per-device state machine prevents false positives from small metadata writes (journal commits, inode updates, directory entries) while maintaining indicator visibility during legitimate file copy operations:[m
+[31m-[m
+[31m-**Phase 1 -- TRIGGER (strict thresholds)**[m
+[31m-[m
+[31m-Both conditions must be met simultaneously to start tracking a write burst:[m
+[31m-[m
+[31m-- Delta bytes >= 64 KB per tick (~32 KB/s at 2-second polling)[m
+[31m-- Average I/O request size >= 16 KB[m
+[31m-[m
+[31m-Small, frequent writes typical of filesystem metadata will not pass these thresholds.[m
+[31m-[m
+[31m-**Phase 2 -- SUSTAIN (permissive)**[m
+[31m-[m
+[31m-Once triggered, any write activity (even small sector changes or in-flight I/O) keeps the indicator alive. This prevents the indicator from flickering off during gaps between kernel writeback rounds.[m
+[31m-[m
+[31m-**DONE (idle detection)**[m
+[31m-[m
+[31m-The burst ends only after 5 consecutive idle ticks (10 seconds) with zero sector changes and zero in-flight I/O. This generous grace period accounts for the bursty nature of Linux's writeback mechanism.[m
+[31m-[m
+[31m-```[m
+[31m-              +------------------+[m
+[31m-              |     IDLE         |[m
+[31m-              | (indicator off)  |[m
+[31m-              +--------+---------+[m
+[31m-                       |[m
+[31m-                       | large write detected[m
+[31m-                       | (>= 64KB/tick AND >= 16KB avg I/O)[m
+[31m-                       v[m
+[31m-              +------------------+[m
+[31m-              |    WRITING       |[m
+[31m-              | (indicator on)   |<---+[m
+[31m-              +--------+---------+    |[m
+[31m-                       |              | any activity or[m
+[31m-                       |              | in-flight I/O[m
+[31m-                       |              |[m
+[31m-              +--------v---------+    |[m
+[31m-              |   IDLE TICK?     +----+[m
+[31m-              | sector_delta==0  |[m
+[31m-              | && in_flight==0  |[m
+[31m-              +--------+---------+[m
+[31m-                       |[m
+[31m-                       | 5 consecutive idle ticks (10s)[m
+[31m-                       v[m
+[31m-              +------------------+[m
+[31m-              |     DONE         |[m
+[31m-              | notify + reset   |[m
+[31m-              +------------------+[m
+[31m-```[m
+[31m-[m
+[31m-**Indicator (Top Bar)**[m
+[31m-[m
+[31m-A `PanelMenu.Button` with a USB drive icon and a dynamic label. Hidden when no writes are active. When one or more devices are writing, the label shows:[m
+[31m-[m
+[31m-```[m
+[31m-DEVICE_LABEL: 123.4 MB (5.2 MB/s) · DEVICE_2: 45.0 MB[m
+[31m-```[m
+[31m-[m
+[31m-- Total bytes written in the current burst[m
+[31m-- Live write speed (updated each tick when new data arrives)[m
+[31m-- Multiple active devices are separated by ` · `[m
+[31m-- Speed display is suppressed when a device is in a writeback gap (shows only total)[m
+[31m-[m
+[31m-**Notifications**[m
+[31m-[m
+[31m-When a device transitions from WRITING to DONE, a desktop notification fires:[m
+[31m-[m
+[31m-> **USB Sync Complete**[m
+[31m-> Write cache flushed -- safe to eject DEVICE_LABEL.[m
+[31m-[m
+[31m-A 10-second cooldown prevents notification spam when multiple devices finish in quick succession.[m
+[31m-[m
+[31m-## Configuration[m
+[31m-[m
+[31m-The extension currently has no user-configurable settings (no GSettings schema). All thresholds are compile-time constants in `extension.js`:[m
+[31m-[m
+[31m-| Constant                 | Default   | Description                                          |[m
+[31m-|--------------------------|-----------|------------------------------------------------------|[m
+[31m-| `POLL_INTERVAL_SECONDS`  | `2`       | Seconds between I/O stat reads                       |[m
+[31m-| `NOTIFY_COOLDOWN_MS`     | `10000`   | Minimum ms between "safe to eject" notifications     |[m
+[31m-| `MIN_WRITE_RATE_BYTES`   | `65536`   | Minimum bytes/tick to trigger Phase 1 (64 KB)        |[m
+[31m-| `MIN_AVG_IO_SIZE_BYTES`  | `16384`   | Minimum average I/O request size for Phase 1 (16 KB) |[m
+[31m-| `IDLE_TICKS_BEFORE_DONE` | `5`       | Consecutive idle ticks before declaring DONE          |[m
+[31m-[m
+[31m-## File Structure[m
+[31m-[m
+[31m-```[m
+[31m-true-usb-progress@ktauchathuranga.github.io/[m
+[31m-  extension.js    -- Extension logic (single-file, ~550 lines)[m
+[31m-  metadata.json   -- GNOME Shell extension manifest[m
+[31m-```[m
+[31m-[m
+[31m-## Dependencies[m
+[31m-[m
+[31m-- **Runtime**: GNOME Shell 45+, UDisks2 (present on all standard GNOME installations)[m
+[31m-- **System interfaces**: `/sys/block/*/stat` (Linux sysfs, always available)[m
+[31m-- **D-Bus**: System bus access to `org.freedesktop.UDisks2`[m
+[31m-- **No external libraries or build tools required**[m
+[31m-[m
+[31m-## How It Works (Summary)[m
+[31m-[m
+[31m-1. On `enable()`, connects to UDisks2 over D-Bus and enumerates mounted USB drives[m
+[31m-2. Subscribes to D-Bus signals for dynamic hotplug/unmount tracking[m
+[31m-3. Starts a 2-second GLib polling loop[m
+[31m-4. Each tick: reads `/sys/block/<dev>/stat` for every tracked device, computes sector deltas[m
+[31m-5. Per-device state machine filters metadata writes and tracks real file copy bursts[m
+[31m-6. Top-bar indicator shows live progress; hides when idle[m
+[31m-7. Desktop notification fires when all pending writes are flushed[m
+[31m-8. On `disable()`, all timers, signal subscriptions, and UI elements are cleaned up[m
+[31m-[m
+[31m-## Debugging[m
+[31m-[m
+[31m-Monitor extension logs in real time:[m
+[31m-[m
+[31m-```bash[m
+[31m-journalctl -f -o cat /usr/bin/gnome-shell[m
+[31m-```[m
+[31m-[m
+[31m-Look for log lines prefixed with `[TrueUsbProgress]`:[m
+[31m-[m
+[31m-```[m
+[31m-[TrueUsbProgress] Tracking USB device: /dev/sdb1 ("MY_USB")[m
+[32m+[m[32mgnome-extensions enable true-usb-progress-plus@dr0p18.github.io[m
+ ```[m
+ [m
+ ## License[m
+ [m
+[31m-This project is open source. See the repository for license details.[m
+[32m+[m[32mMIT — see [LICENSE](./LICENSE). Original copyright retained; fork[m
+[32m+[m[32mmodifications copyright dr0p18.[m
+[1mdiff --git a/extension.js b/extension.js[m
+[1mindex 9d49520..6d20831 100644[m
+[1m--- a/extension.js[m
+[1m+++ b/extension.js[m
+[36m@@ -1,6 +1,6 @@[m
+ /**[m
+  * True USB Write Progress — GNOME Shell Extension[m
+[31m- * UUID : true-usb-progress@ktauchathuranga.github.io[m
+[32m+[m[32m * UUID : true-usb-progress-plus@dr0p18.github.io[m
+  *[m
+  * Monitors kernel dirty-cache writes destined for removable USB block[m
+  * devices and shows a real-time top-bar indicator until the flush is done.[m
+[1mdiff --git a/metadata.json b/metadata.json[m
+[1mindex c0cc194..3f24155 100644[m
+[1m--- a/metadata.json[m
+[1m+++ b/metadata.json[m
+[36m@@ -1,9 +1,9 @@[m
+ {[m
+[31m-  "uuid": "true-usb-progress@ktauchathuranga.github.io",[m
+[31m-  "name": "True USB Write Progress (+ target %)",[m
+[31m-  "description": "A top-bar widget that monitors real-time pending background writes to removable USB storage, showing true dirty-cache flush progress so you know exactly when a drive is safe to eject. This fork also detects the target file size and shows a real percentage/progress bar when possible.",[m
+[32m+[m[32m  "uuid": "true-usb-progress-plus@dr0p18.github.io",[m
+[32m+[m[32m  "name": "True USB Write Progress+",[m
+[32m+[m[32m  "description": "A top-bar widget that monitors real-time pending background writes to removable USB storage, showing true dirty-cache flush progress so you know exactly when a drive is safe to eject. This fork adds target file size detection and shows a real percentage/progress bar when possible, in addition to the original MB/rate display.\n\nFork of true-usb-progress by Ashen Chathuranga (ktauchathuranga).",[m
+   "shell-version": ["45", "46", "47", "48", "49", "50"],[m
+[31m-  "version": 4,[m
+[31m-  "url": "https://github.com/ktauchathuranga/true-usb-progress",[m
+[31m-  "gettext-domain": "true-usb-progress"[m
+[32m+[m[32m  "version": 1,[m
+[32m+[m[32m  "url": "https://github.com/dr0p18/true-usb-progress-plus",[m
+[32m+[m[32m  "gettext-domain": "true-usb-progress-plus"[m
+ }[m

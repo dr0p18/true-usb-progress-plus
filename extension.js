@@ -1,6 +1,6 @@
 /**
  * True USB Write Progress — GNOME Shell Extension
- * UUID : true-usb-progress@ktauchathuranga.github.io
+ * UUID : true-usb-progress-plus@dr0p18.github.io
  *
  * Monitors kernel dirty-cache writes destined for removable USB block
  * devices and shows a real-time top-bar indicator until the flush is done.
