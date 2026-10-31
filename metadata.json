@@ -1,9 +1,14 @@
 {
   "uuid": "true-usb-progress-plus@dr0p18.github.io",
   "name": "True USB Write Progress+",
-  "description": "A top-bar widget that monitors real-time pending background writes to removable USB storage, showing true dirty-cache flush progress so you know exactly when a drive is safe to eject. This fork adds target file size detection and shows a real percentage/progress bar when possible, in addition to the original MB/rate display.\n\nFork of true-usb-progress by Ashen Chathuranga (ktauchathuranga).",
-  "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "version": 1,
-  "url": "https://github.com/dr0p18/true-usb-progress-plus",
-  "gettext-domain": "true-usb-progress-plus"
+  "description": "A top-bar widget that monitors real-time pending background writes to removable USB storage, showing true dirty-cache flush progress so you know exactly when a drive is safe to eject.\n\nThis fork adds a real percentage and progress bar: it watches the files being copied to the drive and compares their total size with the bytes actually flushed to the device. Falls back to the original MB/rate display when no target files are known.\n\nFork of True USB Write Progress by Ashen Chathuranga (ktauchathuranga).",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "url": "https://github.com/dr0p18/true-usb-progress-plus"
 }

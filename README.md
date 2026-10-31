@@ -7,12 +7,18 @@
 > (via UDisks2 `Filesystem.MountPoints` + `Gio.FileMonitor`), so the
 > indicator can show a real percentage and a graphical progress bar,
 > instead of only "N MB written". Falls back to the original text-only
-> display when the target size can't be determined (e.g. a file created
-> in a subfolder, not currently watched).
+> display when the target size can't be determined (e.g. files written into
+> a folder that already existed on the drive, which is not watched).
+>
+> Other fork changes: mount/unmount is detected via `PropertiesChanged`
+> (the original only reacted to interfaces being added/removed), per-partition
+> stats are read from `/sys/class/block/<part>/stat`, bytes are only counted
+> while a burst is active, file queries are asynchronous, and the
+> "safe to eject" cooldown is per device.
 >
 > A pull request with this feature was submitted upstream:
-> https://github.com/ktauchathuranga/true-usb-progress/pull/N
-> (update with the actual PR number). This fork exists as a separately
+> https://github.com/ktauchathuranga/true-usb-progress/pull/4
+> This fork exists as a separately
 > installable extension while that PR is pending review; if/when it's
 > merged upstream, this fork will likely be archived in favor of the
 > original project.
@@ -28,7 +34,7 @@ A GNOME Shell extension that monitors real-time kernel dirty-cache writes destin
 
 When you copy files to a USB drive on Linux, the file manager often reports the operation as "complete" while the data is still sitting in the kernel's write-back cache. Ejecting the drive at this point can result in data corruption. There is no built-in visual feedback for the actual flush progress.
 
-This extension solves that by reading per-device I/O counters directly from `/sys/block/<dev>/stat` and applying heuristic filtering to distinguish real file writes from routine metadata chatter. This fork additionally detects the transfer's target size so it can show real percentage progress, not just a running byte count.
+This extension solves that by reading per-device I/O counters directly from `/sys/class/block/<dev>/stat` and applying heuristic filtering to distinguish real file writes from routine metadata chatter. This fork additionally detects the transfer's target size so it can show real percentage progress, not just a running byte count.
 
 ## Compatibility
 
@@ -73,7 +79,7 @@ gnome-extensions info true-usb-progress-plus@dr0p18.github.io
 
 ```
 +---------------------+       +----------------------------+
-|   UDisks2 (D-Bus)   |       |  /sys/block/<dev>/stat     |
+|   UDisks2 (D-Bus)   |       |  /sys/class/block/<dev>/stat |
 |                     |       |  (kernel block-layer I/O)  |
 +--------+------------+       +-------------+--------------+
          |                                  |
@@ -85,11 +91,10 @@ gnome-extensions info true-usb-progress-plus@dr0p18.github.io
 |                                                          |
 |              TrueUsbProgressExtension                    |
 |                                                          |
-|  _removableDevices   Map<devName, { label, mountPoint,   |
-|                                     targetFile,           |
-|                                     targetSize }>         |
+|  _removableDevices   Map<devName, { label, mountPoint }> |
 |  _devStats           Map<devName, DeviceState>           |
-|  _fileMonitors        Map<devName, Gio.FileMonitor>       |
+|  _watches            Map<devName, { monitors, openFiles, |
+|                                     closedBytes }>       |
 |                                                          |
 |  Per-device two-phase state machine:                     |
 |    Phase 1 (TRIGGER)  -->  Phase 2 (SUSTAIN)  -->  DONE  |
@@ -116,11 +121,19 @@ It subscribes to `InterfacesAdded` and `InterfacesRemoved` signals to dynamicall
 
 **Fork addition — Target size detection**
 
-For each tracked device, the extension also reads `Filesystem.MountPoints` to learn where it's mounted, and opens a `Gio.FileMonitor` on that directory. When a file above `MIN_TARGET_FILE_SIZE_BYTES` (default 20MB) is created there, its size is read via `Gio.File.query_info()` and stored as the transfer's target size. Many filesystems/copy tools preallocate the final file size immediately, so this is usually available right at the start of a large transfer.
+For each tracked device the extension reads `Filesystem.MountPoints` and opens a `Gio.FileMonitor` on the mount root. Every file created there (or in a directory created during the transfer, up to 32 directories per device) is tracked:
 
-**I/O Monitoring (`/sys/block/<dev>/stat`)**
+- while a file is still open, its current size is re-read asynchronously every tick;
+- when it is closed (`CHANGES_DONE_HINT`) its final size is added to a running total;
+- GIO's `.goutputstream-*` temp files are followed through the rename to their final name.
 
-Every 2 seconds, the extension reads the kernel's block-layer statistics for each tracked device. The relevant fields from `/sys/block/<dev>/stat` are:
+The sum is the amount of data the copy has handed to the kernel so far. Bytes written to the device during the burst divided by that sum is the percentage shown. While a multi-file copy is still filling the page cache the total grows, so the shown percentage is held monotonic, and it is capped at 99% until the burst is DONE.
+
+Files moved in from elsewhere on the same drive, writes into pre-existing directories (other than the mount root) and hidden directories are not tracked.
+
+**I/O Monitoring (`/sys/class/block/<dev>/stat`)**
+
+Every 2 seconds, the extension reads the kernel's block-layer statistics for each tracked device. The relevant fields from `/sys/class/block/<dev>/stat` are:
 
 | Field Index | Name              | Description                            |
 |-------------|-------------------|----------------------------------------|
@@ -128,7 +141,7 @@ Every 2 seconds, the extension reads the kernel's block-layer statistics for eac
 | 6           | sectors written   | Total 512-byte sectors written         |
 | 8           | in-flight I/Os    | Currently queued I/O operations        |
 
-Partition names (e.g., `sdb1`) are automatically resolved to parent disk names (e.g., `sdb`) since `/sys/block/` only contains whole-disk entries. This resolution handles SCSI/USB (`sdXN`), NVMe (`nvmeXnYpZ`), and MMC (`mmcblkNpM`) naming schemes.
+Fork change: the original resolved partition names (e.g., `sdb1`) to the parent disk (`sdb`) and read `/sys/block/sdb/stat`. Partitions have their own stat file with the same format under `/sys/class/block/`, so this fork reads the partition directly; two mounted partitions of the same stick are no longer double-counted.
 
 **Two-Phase Write Detection**
 
@@ -149,7 +162,7 @@ Once triggered, any write activity (even small sector changes or in-flight I/O) 
 
 **DONE (idle detection)**
 
-The burst ends only after 5 consecutive idle ticks (10 seconds) with zero sector changes and zero in-flight I/O. This generous grace period accounts for the bursty nature of Linux's writeback mechanism. Fork addition: at this point the device's `targetFile`/`targetSize` are also reset, so the next detected file starts a fresh transfer.
+The burst ends only after 5 consecutive idle ticks (10 seconds) with zero sector changes and zero in-flight I/O. This generous grace period accounts for the bursty nature of Linux's writeback mechanism. Fork addition: at this point the device's tracked target files are also reset, so the next transfer starts fresh.
 
 ```
               +------------------+
@@ -202,7 +215,7 @@ When a device transitions from WRITING to DONE, a desktop notification fires:
 > **USB Sync Complete**
 > Write cache flushed -- safe to eject DEVICE_LABEL.
 
-A 10-second cooldown prevents notification spam when multiple devices finish in quick succession.
+A 10-second per-device cooldown prevents notification spam.
 
 ## Configuration
 
@@ -215,7 +228,8 @@ The extension currently has no user-configurable settings (no GSettings schema).
 | `MIN_WRITE_RATE_BYTES`      | `65536`   | Minimum bytes/tick to trigger Phase 1 (64 KB)        |
 | `MIN_AVG_IO_SIZE_BYTES`     | `16384`   | Minimum average I/O request size for Phase 1 (16 KB) |
 | `IDLE_TICKS_BEFORE_DONE`    | `5`       | Consecutive idle ticks before declaring DONE          |
-| `MIN_TARGET_FILE_SIZE_BYTES`| `20971520`| Fork addition: min file size to be considered "the transfer" (20 MB) |
+| `MAX_WATCHED_DIRS_PER_DEVICE` | `32`  | Fork addition: max directories watched per device    |
+| `TARGET_STALE_MS`           | `120000`  | Fork addition: forget tracked files if no burst starts within this time |
 | `BAR_WIDTH_PX`               | `80`      | Fork addition: fixed width of the graphical progress bar |
 
 ## File Structure
@@ -229,7 +243,7 @@ true-usb-progress-plus@dr0p18.github.io/
 ## Dependencies
 
 - **Runtime**: GNOME Shell 45+, UDisks2 (present on all standard GNOME installations)
-- **System interfaces**: `/sys/block/*/stat` (Linux sysfs, always available)
+- **System interfaces**: `/sys/class/block/*/stat` (Linux sysfs, always available)
 - **D-Bus**: System bus access to `org.freedesktop.UDisks2`
 - **No external libraries or build tools required**
 
@@ -237,9 +251,9 @@ true-usb-progress-plus@dr0p18.github.io/
 
 1. On `enable()`, connects to UDisks2 over D-Bus and enumerates mounted USB drives
 2. Subscribes to D-Bus signals for dynamic hotplug/unmount tracking
-3. Fork addition: reads each device's mount point and watches it with `Gio.FileMonitor` to detect the transfer's target file/size
+3. Fork addition: reads each device's mount point and watches it with `Gio.FileMonitor` to sum the sizes of the files being copied
 4. Starts a 2-second GLib polling loop
-5. Each tick: reads `/sys/block/<dev>/stat` for every tracked device, computes sector deltas
+5. Each tick: reads `/sys/class/block/<dev>/stat` for every tracked device, computes sector deltas
 6. Per-device state machine filters metadata writes and tracks real file copy bursts
 7. Top-bar indicator shows live progress (with percentage/bar when target size is known); hides when idle
 8. Desktop notification fires when all pending writes are flushed

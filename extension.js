@@ -1,25 +1,27 @@
 /**
- * True USB Write Progress — GNOME Shell Extension
+ * True USB Write Progress+ — GNOME Shell Extension
  * UUID : true-usb-progress-plus@dr0p18.github.io
+ *
+ * Fork of true-usb-progress@ktauchathuranga.github.io (MIT, Ashen Chathuranga).
  *
  * Monitors kernel dirty-cache writes destined for removable USB block
  * devices and shows a real-time top-bar indicator until the flush is done.
  *
  * Architecture:
  *  • UDisks2 D-Bus → discover which block devices are removable + mounted
- *  • /sys/block/<dev>/stat → per-device write sectors & I/O request counts
+ *  • /sys/class/block/<dev>/stat → per-device write sectors & I/O request counts
  *  • Delta tracking + threshold heuristics → ignore metadata writes,
  *    only trigger on real file copy/move operations
  *  • GLib.timeout_add_seconds → 2-second polling loop
  *  • PanelMenu.Button → hidden when idle, visible when writing
  *
- * GNOME 45 / 46 + (ESM – no legacy imports.gi)
+ * GNOME 45 + (ESM – no legacy imports.gi)
  *
- * Fork addition: reads Filesystem.MountPoints and watches the mount with
- * Gio.FileMonitor to learn the target file's (often preallocated) final
- * size, so we can show a real percentage/progress bar instead of just
- * "N MB written". Falls back to the original text-only display when no
- * target size can be determined.
+ * Fork addition: watches each mount point (and directories created during a
+ * transfer) with Gio.FileMonitor, and sums the sizes of the files being
+ * written there. Bytes actually flushed to the device divided by that total
+ * gives a real percentage/progress bar. Falls back to the original
+ * "N MB (rate)" text when no target files are known.
  */
 
 import GLib     from 'gi://GLib';
@@ -34,7 +36,7 @@ import * as PanelMenu  from 'resource:///org/gnome/shell/ui/panelMenu.js';
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const POLL_INTERVAL_SECONDS = 2;
-const NOTIFY_COOLDOWN_MS    = 10_000; // min gap between "safe to eject" toasts
+const NOTIFY_COOLDOWN_MS    = 10_000; // min gap between "safe to eject" toasts (per device)
 
 // ── Write-detection thresholds ───────────────────────────────────────────────
 //
@@ -61,9 +63,16 @@ const MIN_AVG_IO_SIZE_BYTES = 16 * 1024;  // 16 KB avg request size
 // 5 ticks × 2 seconds = 10 second grace period.
 const IDLE_TICKS_BEFORE_DONE = 5;
 
-// Fork addition: ignore files smaller than this when looking for the
-// "target" transfer file, to avoid locking onto thumbnails/lockfiles/etc.
-const MIN_TARGET_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
+// Fork addition: target-file tracking limits.
+const MAX_WATCHED_DIRS_PER_DEVICE = 32;     // root + directories created during a copy
+const MAX_OPEN_FILES_PER_DEVICE   = 256;    // files still being written
+const MAX_SIZE_QUERIES_PER_TICK   = 64;
+// Forget target files if no write burst started this long after the last file
+// event (e.g. small files whose writes never passed the trigger thresholds).
+const TARGET_STALE_MS = 120_000;
+// Never show 100% while the indicator is still up: filesystem metadata makes
+// the device byte count overshoot the data size slightly before DONE.
+const MAX_SHOWN_FRACTION = 0.99;
 
 // Fork addition: fixed width (px) of the graphical progress bar in the panel.
 const BAR_WIDTH_PX = 80;
@@ -72,25 +81,31 @@ const BAR_WIDTH_PX = 80;
 const UDISKS2_BUS_NAME  = 'org.freedesktop.UDisks2';
 const UDISKS2_OBJ_PATH  = '/org/freedesktop/UDisks2';
 const DBUS_OBJMAN_IFACE = 'org.freedesktop.DBus.ObjectManager';
+const DBUS_PROPS_IFACE  = 'org.freedesktop.DBus.Properties';
 const UDISKS2_BLOCK     = 'org.freedesktop.UDisks2.Block';
 const UDISKS2_DRIVE     = 'org.freedesktop.UDisks2.Drive';
 const UDISKS2_FS        = 'org.freedesktop.UDisks2.Filesystem';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Promisify Gio.File.load_contents_async for async/await usage
+// Promisify Gio async methods for async/await usage
 Gio._promisify(Gio.File.prototype, 'load_contents_async');
+Gio._promisify(Gio.File.prototype, 'query_info_async');
+Gio._promisify(Gio.File.prototype, 'enumerate_children_async');
+Gio._promisify(Gio.FileEnumerator.prototype, 'next_files_async');
+Gio._promisify(Gio.FileEnumerator.prototype, 'close_async');
 
 /**
  * Read a text file asynchronously via Gio.
  * Returns null on any error so callers can handle gracefully.
  * @param {string} path
+ * @param {Gio.Cancellable} cancellable
  * @returns {Promise<string|null>}
  */
-async function readFileAsync(path) {
+async function readFileAsync(path, cancellable) {
     try {
         const file = Gio.File.new_for_path(path);
-        const [contents] = await file.load_contents_async(null);
+        const [contents] = await file.load_contents_async(cancellable);
         return new TextDecoder().decode(contents);
     } catch (_) {
         return null;
@@ -98,58 +113,42 @@ async function readFileAsync(path) {
 }
 
 /**
- * Strip the partition suffix from a device name to get the parent disk.
- * UDisks2 reports partition names (e.g. "sda1") but /sys/block/ only
- * contains whole-disk entries (e.g. "sda").
- *
- * Handles:
- *   "sda1"       → "sda"
- *   "nvme0n1p1"  → "nvme0n1"
- *   "sda"        → "sda"   (already a whole disk)
- *
- * @param {string} devName
- * @returns {string}
- */
-function toParentDisk(devName) {
-    // NVMe: nvme0n1p1 → nvme0n1  (strip the trailing pN)
-    const nvmeMatch = devName.match(/^(nvme\d+n\d+)p\d+$/);
-    if (nvmeMatch) return nvmeMatch[1];
-
-    // SCSI / USB: sda1 → sda, sdb2 → sdb  (strip trailing digits)
-    const sdMatch = devName.match(/^(sd[a-z]+)\d+$/);
-    if (sdMatch) return sdMatch[1];
-
-    // mmcblk: mmcblk0p1 → mmcblk0
-    const mmcMatch = devName.match(/^(mmcblk\d+)p\d+$/);
-    if (mmcMatch) return mmcMatch[1];
-
-    return devName; // already a whole-disk name
-}
-
-/**
- * Parse /sys/block/<dev>/stat and return write-related counters.
+ * Parse /sys/class/block/<dev>/stat and return write-related counters.
  * Stat fields (0-indexed): https://www.kernel.org/doc/Documentation/block/stat.txt
  *   4 — writes completed
  *   5 — writes merged
  *   6 — sectors written  (each sector = 512 bytes)
  *   8 — I/Os currently in progress
  *
- * Automatically resolves partition names (e.g. "sda1") to the parent disk
- * ("sda") since /sys/block/ only has whole-disk entries.
+ * Fork change: partitions have their own stat file with the same format
+ * under /sys/class/block/, so we read the partition directly instead of
+ * mapping it to the parent disk. Two mounted partitions of the same stick
+ * are no longer double-counted.
  *
  * @param {string} devName  e.g. "sdb1" or "sdb"
- * @returns {Promise<{ writesCompleted: number, sectorsWritten: number, inFlight: number }>}
+ * @param {Gio.Cancellable} cancellable
+ * @returns {Promise<{ writesCompleted: number, sectorsWritten: number, inFlight: number }|null>}
  */
-async function getBlockWriteStats(devName) {
-    const disk = toParentDisk(devName);
-    const text = await readFileAsync(`/sys/block/${disk}/stat`);
-    if (!text) return { writesCompleted: 0, sectorsWritten: 0, inFlight: 0 };
+async function getBlockWriteStats(devName, cancellable) {
+    const text = await readFileAsync(`/sys/class/block/${devName}/stat`, cancellable);
+    if (!text) return null;
     const f = text.trim().split(/\s+/);
     return {
         writesCompleted : parseInt(f[4], 10) || 0,
         sectorsWritten  : parseInt(f[6], 10) || 0,
         inFlight        : parseInt(f[8], 10) || 0,
     };
+}
+
+/**
+ * Decode a NUL-terminated byte string (UDisks2 'ay') to a JS string.
+ * @param {Uint8Array} bytes
+ * @returns {string}
+ */
+function decodeByteString(bytes) {
+    let end = bytes.length;
+    while (end > 0 && bytes[end - 1] === 0) end--;
+    return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
 /**
@@ -160,14 +159,7 @@ async function getBlockWriteStats(devName) {
  */
 function devicePathToName(byteArrayVariant) {
     try {
-        // UDisks2 Device property is 'ay' (byte array).
-        // deep_unpack() returns a Uint8Array — decode it directly.
-        const bytes = byteArrayVariant.deep_unpack(); // Uint8Array
-        // Strip trailing null terminator then decode as UTF-8
-        let end = bytes.length;
-        while (end > 0 && bytes[end - 1] === 0) end--;
-        const str = new TextDecoder().decode(bytes.subarray(0, end));
-        return str.replace('/dev/', '');
+        return decodeByteString(byteArrayVariant.deep_unpack()).replace('/dev/', '');
     } catch (_) {
         return '';
     }
@@ -180,17 +172,8 @@ function firstMountPoint(mountPointsVariant) {
         const arr = mountPointsVariant.deep_unpack();
         if (!arr || arr.length === 0) return null;
         const first = arr[0];
-        // GJS may hand back elements as raw Uint8Array or as GVariant
-        // depending on version — handle both.
-        if (first instanceof Uint8Array) {
-            let end = first.length;
-            while (end > 0 && first[end - 1] === 0) end--;
-            return new TextDecoder().decode(first.subarray(0, end));
-        }
-        const bytes = first.deep_unpack();
-        let end = bytes.length;
-        while (end > 0 && bytes[end - 1] === 0) end--;
-        return new TextDecoder().decode(bytes.subarray(0, end));
+        const bytes = first instanceof Uint8Array ? first : first.deep_unpack();
+        return decodeByteString(bytes) || null;
     } catch (_) {
         return null;
     }
@@ -203,11 +186,14 @@ export default class TrueUsbProgressExtension extends Extension {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     enable() {
-        this._removableDevices = new Map();   // Map<devName, { label }>
-        this._lastNotifyTime   = 0;
+        this._removableDevices = new Map();   // Map<devName, { label, mountPoint }>
+        this._lastNotifyTime   = new Map();   // Map<devName, ms>
         this._pollSourceId     = null;
+        this._enumerateSourceId = null;
         this._udisksSignalIds  = [];
         this._dbusConnection   = null;
+        this._tickRunning      = false;
+        this._cancellable      = new Gio.Cancellable();
 
         // Per-device I/O state + write-detection state machine
         // Map<devName, {
@@ -217,13 +203,19 @@ export default class TrueUsbProgressExtension extends Extension {
         //   wasWriting,                   — is this device in an active burst?
         //   idleTicks,                    — consecutive idle ticks
         //   lastRateMBs,                  — last known write speed string
+        //   shownFraction,                — fork: highest fraction shown this burst
         // }>
         this._devStats         = new Map();
 
-        // Fork addition: one Gio.FileMonitor per watched mount point, used
-        // to detect the transfer's target file and its final size.
-        this._fileMonitors      = new Map(); // Map<devName, Gio.FileMonitor>
-        this._fileMonitorSigIds = new Map(); // Map<devName, signal id>
+        // Fork addition: target-size tracking, per device.
+        // Map<devName, {
+        //   root,          — mount point being watched
+        //   monitors,      — Map<dirPath, { monitor, sigId }>
+        //   openFiles,     — Map<path, size> files still being written
+        //   closedBytes,   — final sizes of files already closed
+        //   lastEventAt,   — ms of last relevant file event
+        // }>
+        this._watches          = new Map();
 
         this._buildIndicator();
         this._connectUDisks2();
@@ -231,26 +223,28 @@ export default class TrueUsbProgressExtension extends Extension {
     }
 
     disable() {
+        this._cancellable.cancel();
+        this._cancellable = null;
+
         this._stopPolling();
         this._disconnectUDisks2();
-        this._clearAllFileMonitors();
+        for (const devName of [...this._watches.keys()])
+            this._unwatchDevice(devName);
         this._destroyIndicator();
 
+        this._watches          = null;
         this._removableDevices = null;
         this._devStats         = null;
+        this._lastNotifyTime   = null;
     }
 
     // ── Indicator (PanelMenu.Button) ───────────────────────────────────────
 
     _buildIndicator() {
         this._indicator = new PanelMenu.Button(0.0, this.metadata.name, true);
-        this._indicator.reactive = true;
 
-        // Container: icon + label, horizontal
-        const box = new St.BoxLayout({
-            style_class : 'panel-status-menu-box',
-            vertical    : false,
-        });
+        // Container: icon + bar + label, horizontal (BoxLayout default)
+        const box = new St.BoxLayout({ style_class: 'panel-status-menu-box' });
 
         // Drive / USB icon
         this._icon = new St.Icon({
@@ -273,8 +267,7 @@ export default class TrueUsbProgressExtension extends Extension {
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._barFill = new St.Widget({
-            style: `width: 0px; height: 8px; border-radius: 4px;
-                    background-color: #3584e4;`,
+            style: 'width: 0px; height: 8px; border-radius: 4px; background-color: #3584e4;',
         });
         this._barBg.add_child(this._barFill);
         this._barBg.hide();
@@ -291,65 +284,69 @@ export default class TrueUsbProgressExtension extends Extension {
     }
 
     _destroyIndicator() {
-        this._icon?.destroy();
-        this._icon = null;
-
-        this._barFill = null; // child of _barBg, destroyed with it
-        this._barBg?.destroy();
-        this._barBg = null;
-
-        this._label?.destroy();
-        this._label = null;
-
-        if (this._indicator) {
-            this._indicator.destroy();
-            this._indicator = null;
-        }
+        // Children are destroyed together with the indicator.
+        this._indicator?.destroy();
+        this._indicator = null;
+        this._icon      = null;
+        this._label     = null;
+        this._barBg     = null;
+        this._barFill   = null;
     }
 
     // ── UDisks2 D-Bus integration ──────────────────────────────────────────
 
     _connectUDisks2() {
-        try {
-            this._dbusConnection = Gio.bus_get_sync(Gio.BusType.SYSTEM, null);
-        } catch (e) {
-            logError(e, '[TrueUsbProgress] Could not get system D-Bus connection');
+        this._dbusConnection = Gio.DBus.system;
+        if (!this._dbusConnection) {
+            console.error('[TrueUsbProgress] Could not get system D-Bus connection');
             return;
         }
 
         // Initial enumeration of existing objects
         this._enumerateUDisks2Objects();
 
-        // Watch for objects added / removed while extension is active
-        const addedId = this._dbusConnection.signal_subscribe(
+        const subscribe = (iface, member, arg0) => this._dbusConnection.signal_subscribe(
             UDISKS2_BUS_NAME,
-            DBUS_OBJMAN_IFACE,
-            'InterfacesAdded',
-            UDISKS2_OBJ_PATH,
+            iface,
+            member,
             null,
+            arg0,
             Gio.DBusSignalFlags.NONE,
-            this._onInterfacesAdded.bind(this),
-        );
-        const removedId = this._dbusConnection.signal_subscribe(
-            UDISKS2_BUS_NAME,
-            DBUS_OBJMAN_IFACE,
-            'InterfacesRemoved',
-            UDISKS2_OBJ_PATH,
-            null,
-            Gio.DBusSignalFlags.NONE,
-            this._onInterfacesRemoved.bind(this),
+            () => this._scheduleEnumerate(),
         );
 
-        this._udisksSignalIds.push(addedId, removedId);
+        // Watch for objects added / removed while extension is active
+        this._udisksSignalIds.push(
+            subscribe(DBUS_OBJMAN_IFACE, 'InterfacesAdded', null),
+            subscribe(DBUS_OBJMAN_IFACE, 'InterfacesRemoved', null),
+            // Fork addition: mounting/unmounting only changes the
+            // Filesystem.MountPoints property, it doesn't add interfaces.
+            subscribe(DBUS_PROPS_IFACE, 'PropertiesChanged', UDISKS2_FS),
+        );
     }
 
     _disconnectUDisks2() {
+        if (this._enumerateSourceId) {
+            GLib.source_remove(this._enumerateSourceId);
+            this._enumerateSourceId = null;
+        }
         if (this._dbusConnection) {
             for (const id of this._udisksSignalIds)
                 this._dbusConnection.signal_unsubscribe(id);
         }
         this._udisksSignalIds  = [];
         this._dbusConnection   = null;
+    }
+
+    // Fork addition: plugging a drive emits a flurry of signals; coalesce
+    // them into a single GetManagedObjects call.
+    _scheduleEnumerate() {
+        if (this._enumerateSourceId) return;
+        this._enumerateSourceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
+            this._enumerateSourceId = null;
+            this._enumerateUDisks2Objects();
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     /**
@@ -368,14 +365,15 @@ export default class TrueUsbProgressExtension extends Extension {
             new GLib.VariantType('(a{oa{sa{sv}}})'),
             Gio.DBusCallFlags.NONE,
             5000,
-            null,
+            this._cancellable,
             (conn, res) => {
                 try {
                     const reply  = conn.call_finish(res);
                     const [objects] = reply.deep_unpack();
                     this._processUDisks2Objects(objects);
                 } catch (e) {
-                    logError(e, '[TrueUsbProgress] GetManagedObjects failed');
+                    if (!e.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+                        console.error(e, '[TrueUsbProgress] GetManagedObjects failed');
                 }
             },
         );
@@ -385,15 +383,17 @@ export default class TrueUsbProgressExtension extends Extension {
      * Walk the UDisks2 object tree.  For each block device we check:
      *   1. Does it have a Block interface with a Drive property?
      *   2. Is that Drive removable with ConnectionBus == "usb"?
-     *   3. Does it have a Filesystem interface (i.e. is it mounted)?
+     *   3. Does it have a Filesystem interface?
      * If all true → add to _removableDevices with a human-readable label.
      *
      * Label priority:  filesystem label (IdLabel) → drive model → dev name.
      *
      * Fork addition: also reads Filesystem.MountPoints and reconciles the
-     * per-device Gio.FileMonitor set accordingly.
+     * per-device file watches accordingly.
      */
     _processUDisks2Objects(objects) {
+        if (!this._removableDevices) return; // disabled meanwhile
+
         // Build a drive-path → { isUsb, model } map first
         const driveInfo = {};
         for (const [objPath, ifaces] of Object.entries(objects)) {
@@ -419,7 +419,7 @@ export default class TrueUsbProgressExtension extends Extension {
             const info      = driveInfo[drivePath];
             if (!info?.isUsb) continue;
 
-            // Must have a Filesystem interface (partitions without mounts are ignored)
+            // Must have a Filesystem interface (partitions without one are ignored)
             const fsIface = ifaces[UDISKS2_FS];
             if (!fsIface) continue;
 
@@ -436,107 +436,259 @@ export default class TrueUsbProgressExtension extends Extension {
                 ? firstMountPoint(fsIface['MountPoints'])
                 : null;
 
-            // Keep any in-progress target info across re-enumerations, so an
-            // unrelated InterfacesAdded/Removed event (e.g. another drive
-            // plugged in) doesn't reset a transfer already being tracked.
-            const prev = this._removableDevices.get(devName);
+            newDevices.set(devName, { label, mountPoint });
+        }
 
-            newDevices.set(devName, {
-                label,
-                mountPoint,
-                targetFile : prev?.targetFile ?? null,
-                targetSize : prev?.targetSize ?? 0,
-            });
-
-            log(`[TrueUsbProgress] Tracking USB device: /dev/${devName} ("${label}") mount=${mountPoint}`);
+        // Fork addition: drop state of devices that went away, so a
+        // re-plugged stick doesn't resume a stale burst.
+        for (const devName of [...this._devStats.keys()]) {
+            if (!newDevices.has(devName))
+                this._devStats.delete(devName);
         }
 
         this._removableDevices = newDevices;
-        this._reconcileFileMonitors();
+        this._reconcileWatches();
     }
 
-    /** UDisks2 InterfacesAdded — re-enumerate so we pick up new mounts */
-    _onInterfacesAdded(_conn, _sender, _objPath, _iface, _signal, _params) {
-        this._enumerateUDisks2Objects();
-    }
+    // ── Fork addition: file watching for target-size detection ─────────────
+    //
+    // Files created on the drive (in the mount root, or in directories
+    // created during the transfer) are tracked. Open files have their size
+    // re-read every tick; once closed (CHANGES_DONE_HINT) their final size
+    // moves into closedBytes. The sum is what the copy has written so far,
+    // i.e. what must eventually be flushed to the device.
+    //
+    // Not tracked: files moved in from elsewhere on the same drive (no data
+    // is written), pre-existing directories other than the mount root, and
+    // hidden directories (e.g. .Trash-1000).
 
-    /** UDisks2 InterfacesRemoved — re-enumerate so we drop unmounted devices */
-    _onInterfacesRemoved(_conn, _sender, _objPath, _iface, _signal, _params) {
-        this._enumerateUDisks2Objects();
-    }
-
-    // ── Fork addition: file monitoring for target-size detection ────────────
-
-    // Keep exactly one Gio.FileMonitor per currently-tracked device that has
-    // a known mount point, and none for devices no longer present.
-    _reconcileFileMonitors() {
-        if (!this._removableDevices) return;
-
-        for (const devName of [...this._fileMonitors.keys()]) {
-            if (!this._removableDevices.has(devName))
-                this._removeFileMonitor(devName);
+    _reconcileWatches() {
+        for (const [devName, watch] of [...this._watches]) {
+            if (this._removableDevices.get(devName)?.mountPoint !== watch.root)
+                this._unwatchDevice(devName);
         }
 
         for (const [devName, info] of this._removableDevices) {
-            if (!info.mountPoint) continue;
-            if (this._fileMonitors.has(devName)) continue;
-            this._addFileMonitor(devName, info.mountPoint);
+            if (info.mountPoint && !this._watches.has(devName))
+                this._watchDevice(devName, info.mountPoint);
         }
     }
 
-    _addFileMonitor(devName, mountPoint) {
+    _watchDevice(devName, mountPoint) {
+        this._watches.set(devName, {
+            root        : mountPoint,
+            monitors    : new Map(),
+            openFiles   : new Map(),
+            closedBytes : 0,
+            lastEventAt : 0,
+        });
+        this._addDirMonitor(devName, Gio.File.new_for_path(mountPoint));
+    }
+
+    _unwatchDevice(devName) {
+        const watch = this._watches.get(devName);
+        if (!watch) return;
+        for (const path of [...watch.monitors.keys()])
+            this._removeDirMonitor(watch, path);
+        this._watches.delete(devName);
+    }
+
+    _addDirMonitor(devName, dir) {
+        const watch = this._watches.get(devName);
+        const path  = dir.get_path();
+        if (!watch || watch.monitors.has(path) ||
+            watch.monitors.size >= MAX_WATCHED_DIRS_PER_DEVICE)
+            return false;
+
         try {
-            const dir = Gio.File.new_for_path(mountPoint);
-            const monitor = dir.monitor_directory(Gio.FileMonitorFlags.NONE, null);
-            const sigId = monitor.connect('changed', (_mon, file, _other, eventType) => {
-                this._onFileEvent(devName, file, eventType);
+            const monitor = dir.monitor_directory(Gio.FileMonitorFlags.WATCH_MOVES, null);
+            const sigId = monitor.connect('changed', (_mon, file, otherFile, eventType) => {
+                this._onFileEvent(devName, file, otherFile, eventType);
             });
-            this._fileMonitors.set(devName, monitor);
-            this._fileMonitorSigIds.set(devName, sigId);
+            watch.monitors.set(path, { monitor, sigId });
+            return true;
         } catch (e) {
-            logError(e, `[TrueUsbProgress] Could not watch ${mountPoint}`);
+            console.error(e, `[TrueUsbProgress] Could not watch ${path}`);
+            return false;
         }
     }
 
-    _removeFileMonitor(devName) {
-        const monitor = this._fileMonitors.get(devName);
-        if (monitor) {
-            const sigId = this._fileMonitorSigIds.get(devName);
-            if (sigId) monitor.disconnect(sigId);
-            monitor.cancel();
+    _removeDirMonitor(watch, path) {
+        const entry = watch.monitors.get(path);
+        if (!entry) return;
+        entry.monitor.disconnect(entry.sigId);
+        entry.monitor.cancel();
+        watch.monitors.delete(path);
+    }
+
+    // Forget all target files and the per-transfer directory monitors,
+    // keeping only the mount-root monitor.
+    _resetTargets(devName) {
+        const watch = this._watches.get(devName);
+        if (!watch) return;
+        watch.openFiles.clear();
+        watch.closedBytes = 0;
+        for (const path of [...watch.monitors.keys()]) {
+            if (path !== watch.root)
+                this._removeDirMonitor(watch, path);
         }
-        this._fileMonitors.delete(devName);
-        this._fileMonitorSigIds.delete(devName);
     }
 
-    _clearAllFileMonitors() {
-        for (const devName of [...this._fileMonitors.keys()])
-            this._removeFileMonitor(devName);
+    _targetSize(devName) {
+        const watch = this._watches.get(devName);
+        if (!watch) return 0;
+        let total = watch.closedBytes;
+        for (const size of watch.openFiles.values())
+            total += size;
+        return total;
     }
 
-    // When a large-enough new file appears on a watched mount, treat it as
-    // the transfer's target and read its (often preallocated) final size.
-    _onFileEvent(devName, file, eventType) {
-        if (eventType !== Gio.FileMonitorEvent.CREATED &&
-            eventType !== Gio.FileMonitorEvent.CHANGES_DONE_HINT)
+    _onFileEvent(devName, file, otherFile, eventType) {
+        const watch = this._watches?.get(devName);
+        if (!watch) return;
+        const path = file.get_path();
+
+        switch (eventType) {
+        case Gio.FileMonitorEvent.CREATED:
+            watch.lastEventAt = Date.now();
+            // Register synchronously so a quick CHANGES_DONE_HINT isn't
+            // missed while the type query below is still in flight.
+            if (watch.openFiles.size < MAX_OPEN_FILES_PER_DEVICE)
+                watch.openFiles.set(path, 0);
+            this._classifyCreated(devName, file).catch(logUnexpected);
+            break;
+
+        case Gio.FileMonitorEvent.CHANGES_DONE_HINT:
+            if (watch.openFiles.has(path)) {
+                watch.lastEventAt = Date.now();
+                this._finalizeFile(devName, file).catch(logUnexpected);
+            }
+            break;
+
+        case Gio.FileMonitorEvent.RENAMED:
+            // e.g. GIO's ".goutputstream-XXXXXX" temp file renamed over the
+            // destination when replacing an existing file.
+            if (otherFile && watch.openFiles.has(path)) {
+                const size = watch.openFiles.get(path);
+                watch.openFiles.delete(path);
+                watch.openFiles.set(otherFile.get_path(), size);
+            }
+            break;
+
+        case Gio.FileMonitorEvent.DELETED:
+        case Gio.FileMonitorEvent.MOVED_OUT:
+            watch.openFiles.delete(path);
+            if (path !== watch.root)
+                this._removeDirMonitor(watch, path);
+            break;
+        }
+    }
+
+    async _classifyCreated(devName, file) {
+        let info;
+        try {
+            info = await file.query_info_async('standard::type,standard::size',
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT,
+                this._cancellable);
+        } catch (_) {
+            this._watches?.get(devName)?.openFiles.delete(file.get_path());
             return;
+        }
 
-        if (!this._removableDevices?.has(devName)) return;
+        const watch = this._watches?.get(devName);
+        if (!watch) return;
+        const path = file.get_path();
+        const type = info.get_file_type();
+
+        if (type === Gio.FileType.REGULAR) {
+            if (watch.openFiles.has(path))
+                watch.openFiles.set(path, info.get_size());
+            return;
+        }
+
+        watch.openFiles.delete(path);
+        if (type === Gio.FileType.DIRECTORY && !file.get_basename().startsWith('.') &&
+            this._addDirMonitor(devName, file))
+            await this._scanNewDir(devName, file);
+    }
+
+    // A directory created by the copy may already contain files (or
+    // subdirectories) by the time its monitor is attached.
+    async _scanNewDir(devName, dir) {
+        let enumerator;
+        try {
+            enumerator = await dir.enumerate_children_async('standard::name,standard::type,standard::size',
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT,
+                this._cancellable);
+        } catch (_) {
+            return;
+        }
 
         try {
-            const info = file.query_info('standard::size,standard::type',
-                Gio.FileQueryInfoFlags.NONE, null);
-            if (info.get_file_type() !== Gio.FileType.REGULAR) return;
+            for (;;) {
+                const infos = await enumerator.next_files_async(64, GLib.PRIORITY_DEFAULT,
+                    this._cancellable);
+                if (infos.length === 0) break;
 
-            const size = info.get_size();
-            if (size < MIN_TARGET_FILE_SIZE_BYTES) return;
+                const watch = this._watches?.get(devName);
+                if (!watch) return;
 
-            const devInfo = this._removableDevices.get(devName);
-            devInfo.targetFile = file.get_path();
-            devInfo.targetSize = size;
+                for (const info of infos) {
+                    const child = dir.get_child(info.get_name());
+                    const type  = info.get_file_type();
+                    if (type === Gio.FileType.REGULAR) {
+                        if (watch.openFiles.size < MAX_OPEN_FILES_PER_DEVICE)
+                            watch.openFiles.set(child.get_path(), info.get_size());
+                    } else if (type === Gio.FileType.DIRECTORY &&
+                               !info.get_name().startsWith('.') &&
+                               this._addDirMonitor(devName, child)) {
+                        await this._scanNewDir(devName, child);
+                    }
+                }
+            }
         } catch (_) {
-            // file may have vanished/renamed between the event and the query
+            // directory vanished or extension disabled
+        } finally {
+            enumerator.close_async(GLib.PRIORITY_DEFAULT, null).catch(() => {});
         }
+    }
+
+    async _finalizeFile(devName, file) {
+        const size = await this._querySize(file);
+        const watch = this._watches?.get(devName);
+        const path = file.get_path();
+        if (!watch || !watch.openFiles.has(path)) return;
+
+        const finalSize = size ?? watch.openFiles.get(path);
+        watch.openFiles.delete(path);
+        watch.closedBytes += finalSize;
+    }
+
+    async _querySize(file) {
+        try {
+            const info = await file.query_info_async('standard::size',
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, GLib.PRIORITY_DEFAULT,
+                this._cancellable);
+            return info.get_size();
+        } catch (_) {
+            return null;
+        }
+    }
+
+    // Re-read the current size of files that are still being written.
+    async _refreshOpenFiles(devName) {
+        const watch = this._watches.get(devName);
+        if (!watch || watch.openFiles.size === 0) return;
+
+        const paths = [...watch.openFiles.keys()].slice(0, MAX_SIZE_QUERIES_PER_TICK);
+        const sizes = await Promise.all(
+            paths.map(p => this._querySize(Gio.File.new_for_path(p))));
+
+        if (this._watches?.get(devName) !== watch) return;
+        paths.forEach((p, i) => {
+            if (sizes[i] !== null && watch.openFiles.has(p))
+                watch.openFiles.set(p, sizes[i]);
+        });
     }
 
     // ── Polling ────────────────────────────────────────────────────────────
@@ -546,7 +698,14 @@ export default class TrueUsbProgressExtension extends Extension {
             GLib.PRIORITY_DEFAULT,
             POLL_INTERVAL_SECONDS,
             () => {
-                this._tick();
+                // Fork addition: never run two ticks concurrently (slow
+                // async reads could otherwise interleave state updates).
+                if (!this._tickRunning) {
+                    this._tickRunning = true;
+                    this._tick()
+                        .catch(logUnexpected)
+                        .finally(() => { this._tickRunning = false; });
+                }
                 return GLib.SOURCE_CONTINUE;
             },
         );
@@ -585,21 +744,35 @@ export default class TrueUsbProgressExtension extends Extension {
             return;
         }
 
+        const cancellable = this._cancellable;
+        const devices = [...this._removableDevices];
+
+        // Read all counters (and refresh open target files) in parallel
+        const allStats = await Promise.all(devices.map(async ([dev]) => {
+            const [stats] = await Promise.all([
+                getBlockWriteStats(dev, cancellable),
+                this._refreshOpenFiles(dev),
+            ]);
+            return stats;
+        }));
+
+        // Guard: extension may have been disabled during the async reads
+        if (!this._indicator) return;
+
         // Names of devices that just finished their burst this tick
         const justFinished = [];
+        const now = Date.now();
 
         // ── 1. Per-device delta analysis + state machine ──────────────────
-        for (const [dev, devInfo] of this._removableDevices) {
-            const stats = await getBlockWriteStats(dev);
-
-            // Guard: extension may have been disabled during the async read
-            if (!this._indicator) return;
+        devices.forEach(([dev, devInfo], i) => {
+            const stats = allStats[i];
+            if (!stats) return;
 
             let st = this._devStats.get(dev);
 
             if (!st) {
                 // First time seeing this device — store baseline
-                st = {
+                this._devStats.set(dev, {
                     prevWrites         : stats.writesCompleted,
                     prevSectors        : stats.sectorsWritten,
                     totalBytesThisBurst: 0,
@@ -607,9 +780,9 @@ export default class TrueUsbProgressExtension extends Extension {
                     wasWriting         : false,
                     idleTicks          : 0,
                     lastRateMBs        : '0.0',
-                };
-                this._devStats.set(dev, st);
-                continue;
+                    shownFraction      : 0,
+                });
+                return;
             }
 
             const deltaWrites  = stats.writesCompleted - st.prevWrites;
@@ -631,16 +804,18 @@ export default class TrueUsbProgressExtension extends Extension {
             // Track this tick's delta for speed display
             st.deltaBytesThisTick = hasActivity ? deltaBytes : 0;
 
-            if (hasActivity) {
-                st.totalBytesThisBurst += deltaBytes;
-            }
-
             // ── Per-device state machine ───────────────────────────────────
             if (!st.wasWriting) {
                 // Phase 1: only large writes can start a burst
                 if (isLargeWrite) {
                     st.wasWriting = true;
                     st.idleTicks  = 0;
+                } else {
+                    // Fork addition: forget target files whose writes never
+                    // turned into a burst.
+                    const watch = this._watches.get(dev);
+                    if (watch && now - watch.lastEventAt > TARGET_STALE_MS)
+                        this._resetTargets(dev);
                 }
             } else {
                 // Phase 2: any activity or in-flight keeps it alive
@@ -654,60 +829,70 @@ export default class TrueUsbProgressExtension extends Extension {
                         st.idleTicks           = 0;
                         st.totalBytesThisBurst = 0;
                         st.lastRateMBs         = '0.0';
-                        // Fork addition: clear target too, so the next
-                        // detected file starts a fresh transfer.
-                        devInfo.targetFile = null;
-                        devInfo.targetSize = 0;
-                        justFinished.push(devInfo.label);
+                        st.shownFraction       = 0;
+                        // Fork addition: clear targets too, so the next
+                        // transfer starts fresh.
+                        this._resetTargets(dev);
+                        justFinished.push({ dev, label: devInfo.label });
                     }
                 }
             }
+
+            // Fork change: only count bytes while a burst is active, so idle
+            // metadata writes don't accumulate into the next burst's total.
+            if (st.wasWriting && hasActivity)
+                st.totalBytesThisBurst += deltaBytes;
 
             // Update speed string when we have fresh data
             if (st.deltaBytesThisTick > 0) {
                 st.lastRateMBs = (st.deltaBytesThisTick / (1024 * 1024) / POLL_INTERVAL_SECONDS).toFixed(1);
             }
-        }
+        });
 
         // ── 2. Fire notifications for any devices that just finished ──────
-        for (const name of justFinished) {
-            this._notifySyncComplete(name);
+        for (const { dev, label } of justFinished) {
+            this._notifySyncComplete(dev, label);
         }
 
         // ── 3. Build indicator from all devices currently writing ─────────
-        const activeDevices = [];
+        const parts = [];
+        let barWritten = 0;
+        let barTotal   = 0;
+
         for (const [dev, devInfo] of this._removableDevices) {
             const st = this._devStats.get(dev);
             if (!st?.wasWriting) continue;
-            activeDevices.push({ dev, devInfo, st });
+
+            const mb = (st.totalBytesThisBurst / (1024 * 1024)).toFixed(1);
+            const rateSuffix = st.deltaBytesThisTick > 0 ? ` (${st.lastRateMBs} MB/s)` : '';
+            const targetSize = this._targetSize(dev);
+
+            // Fork addition: include a percentage when the target size is
+            // known, otherwise fall back to the original "MB (rate)" text.
+            if (targetSize > 0) {
+                const fraction = Math.min(MAX_SHOWN_FRACTION, st.totalBytesThisBurst / targetSize);
+                // The total can grow while a multi-file copy is still filling
+                // the page cache; don't let the shown percentage go backwards.
+                st.shownFraction = Math.max(st.shownFraction, fraction);
+                const pct = Math.floor(st.shownFraction * 100);
+                const totalMb = (targetSize / (1024 * 1024)).toFixed(0);
+                parts.push(`${devInfo.label}: ${pct}% · ${mb}/${totalMb} MB${rateSuffix}`);
+                barWritten += st.shownFraction * targetSize;
+                barTotal   += targetSize;
+            } else {
+                parts.push(`${devInfo.label}: ${mb} MB${rateSuffix}`);
+            }
         }
 
-        if (activeDevices.length > 0) {
-            // Fork addition: include a percentage when target size is known,
-            // otherwise fall back to the original "MB (rate)" text.
-            const parts = activeDevices.map(({ devInfo, st }) => {
-                const mb = (st.totalBytesThisBurst / (1024 * 1024)).toFixed(1);
-                const rateSuffix = st.deltaBytesThisTick > 0 ? ` (${st.lastRateMBs} MB/s)` : '';
+        if (parts.length > 0) {
+            this._label.set_text(parts.join(' · '));
 
-                if (devInfo.targetSize > 0) {
-                    const fraction = Math.max(0, Math.min(1, st.totalBytesThisBurst / devInfo.targetSize));
-                    const pct = Math.round(fraction * 100);
-                    const totalMb = (devInfo.targetSize / (1024 * 1024)).toFixed(0);
-                    return { text: `${devInfo.label}: ${pct}% · ${mb}/${totalMb} MB${rateSuffix}`, fraction };
-                }
-                return { text: `${devInfo.label}: ${mb} MB${rateSuffix}`, fraction: null };
-            });
-
-            this._label.set_text(parts.map(p => p.text).join(' · '));
-
-            // Fork addition: graphical bar reflects the highest-known
-            // fraction among active devices; hidden if none is known.
-            const known = parts.filter(p => p.fraction !== null);
-            if (known.length > 0) {
-                const best = known.reduce((a, b) => (b.fraction > a.fraction ? b : a));
+            // Fork addition: graphical bar shows combined progress of the
+            // active devices with a known target; hidden if none.
+            if (barTotal > 0) {
+                const width = Math.round(BAR_WIDTH_PX * barWritten / barTotal);
                 this._barFill.set_style(
-                    `width: ${Math.round(BAR_WIDTH_PX * best.fraction)}px; height: 8px;
-                     border-radius: 4px; background-color: #3584e4;`);
+                    `width: ${width}px; height: 8px; border-radius: 4px; background-color: #3584e4;`);
                 this._barBg.show();
             } else {
                 this._barBg.hide();
@@ -724,16 +909,22 @@ export default class TrueUsbProgressExtension extends Extension {
 
     /**
      * Notify the user that a specific USB drive has finished syncing.
+     * @param {string} devName    Device name, used for the per-device cooldown
      * @param {string} driveName  Human-readable label of the drive
      */
-    _notifySyncComplete(driveName) {
+    _notifySyncComplete(devName, driveName) {
         const now = GLib.get_monotonic_time() / 1000; // µs → ms
-        if (now - this._lastNotifyTime < NOTIFY_COOLDOWN_MS) return;
-        this._lastNotifyTime = now;
+        if (now - (this._lastNotifyTime.get(devName) ?? -Infinity) < NOTIFY_COOLDOWN_MS) return;
+        this._lastNotifyTime.set(devName, now);
 
         Main.notify(
             'USB Sync Complete',
             `Write cache flushed — safe to eject ${driveName}.`,
         );
     }
+}
+
+function logUnexpected(e) {
+    if (!e?.matches?.(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED))
+        console.error(e, '[TrueUsbProgress] Unexpected error');
 }
