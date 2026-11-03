@@ -64,7 +64,7 @@ git clone https://github.com/dr0p18/true-usb-progress-plus.git
 cd true-usb-progress-plus
 
 # Builds the zip (compiling the translations in po/) and installs it
-gnome-extensions pack --force --podir=po .
+gnome-extensions pack --force --podir=po --extra-source=LICENSE .
 gnome-extensions install --force true-usb-progress-plus@dr0p18.github.io.shell-extension.zip
 
 # Restart GNOME Shell (X11: Alt+F2, type 'r', Enter)
