@@ -301,9 +301,12 @@ Then translate `po/<lang>.po` and open a pull request.
 
 ## Support
 
-If this fork is useful to you, you can support its maintainer on
-[Ko-fi](https://ko-fi.com/jacopoleonardi), and the original author via
-[GitHub Sponsors](https://github.com/sponsors/ktauchathuranga).
+If this extension is useful to you, you can support:
+
+- **the current maintainer** of True USB Write Progress+ on
+  [Ko-fi](https://ko-fi.com/jacopoleonardi);
+- **the original author** of True USB Write Progress via
+  [GitHub Sponsors](https://github.com/sponsors/ktauchathuranga).
 
 ## License
 
