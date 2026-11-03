@@ -107,7 +107,6 @@ const MAX_SHOWN_FRACTION = 0.99;
 
 // Fork addition: UI.
 const PANEL_BAR_WIDTH_PX = 64;
-const MENU_BAR_WIDTH_PX  = 240;
 const FADE_MS            = 200;
 // Duration of each bar movement: constant, so speed ∝ distance covered.
 const BAR_ANIM_MS        = 1_500;
@@ -289,30 +288,58 @@ function firstMountPoint(mountPointsVariant) {
     }
 }
 
-// Fork addition: a fixed-width track with an eased fill, used both in the
-// panel and in the menu. Fill width is an actor property (not CSS) so it can
-// be animated.
+// Fork addition: a progress track with an eased fill, used in the panel
+// (fixed width) and in the menu (stretched to the row). The fill width is an
+// actor property (not CSS) so it can be animated.
 class ProgressBar {
+    // widthPx: fixed track width, or null to fill the parent's width.
     constructor(widthPx, styleClass) {
-        this._widthPx = widthPx;
+        this._widthPx  = widthPx;
+        this._fraction = 0;
+        this._idleId   = 0;
+        this._allocId  = 0;
+        const fixed = widthPx !== null;
         this.actor = new St.Widget({
             style_class : `tup-bar ${styleClass}`,
-            style       : `width: ${widthPx}px;`,
-            // START: never stretched by the parent, so the track is exactly
-            // widthPx wide and a full fill reaches its end.
-            x_align     : Clutter.ActorAlign.START,
-            x_expand    : false,
+            style       : fixed ? `width: ${widthPx}px;` : null,
+            // A fixed track is never stretched by its parent, so a full fill
+            // always reaches its end.
+            x_align     : fixed ? Clutter.ActorAlign.START : Clutter.ActorAlign.FILL,
+            x_expand    : !fixed,
             y_align     : Clutter.ActorAlign.CENTER,
         });
         this._fill = new St.Widget({ style_class: 'tup-bar-fill', width: 0 });
         if (SHELL_MAJOR >= 47)
             this._fill.add_style_class_name('tup-accent');
         this.actor.add_child(this._fill);
+
+        // A stretched track only knows its width after layout. Resizing the
+        // fill during an allocation would queue a relayout inside it, so
+        // re-apply the fraction from an idle callback instead.
+        if (!fixed) {
+            this._allocId = this.actor.connect('notify::allocation', () => {
+                if (this._idleId) return;
+                this._idleId = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                    this._idleId = 0;
+                    const target = this._targetWidth(this._fraction);
+                    if (Math.abs(this._fill.width - target) > 1)
+                        this.setFraction(this._fraction, 0);
+                    return GLib.SOURCE_REMOVE;
+                });
+            });
+        }
+    }
+
+    _targetWidth(fraction) {
+        const track = this._widthPx ??
+            (this.actor.has_allocation() ? this.actor.allocation.get_width() : 0);
+        return Math.round(track * Math.max(0, Math.min(1, fraction)));
     }
 
     // Glide to the new value over `duration` ms; 0 jumps immediately.
     setFraction(fraction, duration) {
-        const width = Math.round(this._widthPx * Math.max(0, Math.min(1, fraction)));
+        this._fraction = fraction;
+        const width = this._targetWidth(fraction);
         if (duration <= 0) {
             this._fill.remove_all_transitions();
             this._fill.width = width;
@@ -333,6 +360,14 @@ class ProgressBar {
     }
 
     destroy() {
+        if (this._idleId) {
+            GLib.source_remove(this._idleId);
+            this._idleId = 0;
+        }
+        if (this._allocId) {
+            this.actor.disconnect(this._allocId);
+            this._allocId = 0;
+        }
         this._fill?.destroy();
         this.actor?.destroy();
         this._fill = null;
@@ -1383,7 +1418,7 @@ export default class TrueUsbProgressExtension extends Extension {
         item.track_hover = false;
         const box  = makeVBox({ style_class: 'tup-row', x_expand: true });
         const title  = new St.Label({ style_class: 'tup-row-title' });
-        const bar    = new ProgressBar(MENU_BAR_WIDTH_PX, 'tup-bar-menu');
+        const bar    = new ProgressBar(null, 'tup-bar-menu');
         const detail = new St.Label({ style_class: 'tup-row-detail' });
         const state  = new St.Label({ style_class: 'tup-row-state' });
         box.add_child(title);
