@@ -1,5 +1,6 @@
 {
   "uuid": "true-usb-progress-plus@dr0p18.github.io",
+  "gettext-domain": "true-usb-progress-plus",
   "name": "True USB Write Progress+",
   "description": "A top-bar widget that monitors real-time pending background writes to removable USB storage, showing true dirty-cache flush progress so you know exactly when a drive is safe to eject.\n\nThis fork shows a real percentage and progress bar: it watches the files being copied to the drive and compares their total size with the bytes actually flushed to the device. Click the indicator for per-drive details and a \"Flush now\" button that writes cached data immediately. \"Safe to eject\" is only announced once the data is really on the device. Works with LUKS-encrypted drives.\n\nFork of True USB Write Progress by Ashen Chathuranga (ktauchathuranga).",
   "shell-version": [

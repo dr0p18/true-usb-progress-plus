@@ -36,7 +36,7 @@ import Gio      from 'gi://Gio';
 import St       from 'gi://St';
 import Clutter  from 'gi://Clutter';
 
-import { Extension }   from 'resource:///org/gnome/shell/extensions/extension.js';
+import { Extension, gettext as _ } from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main       from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu  from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu  from 'resource:///org/gnome/shell/ui/popupMenu.js';
@@ -456,7 +456,7 @@ export default class TrueUsbProgressExtension extends Extension {
         this._rowsSection = new PopupMenu.PopupMenuSection();
         this._indicator.menu.addMenuItem(this._rowsSection);
         this._indicator.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this._flushItem = new PopupMenu.PopupMenuItem('Flush now');
+        this._flushItem = new PopupMenu.PopupMenuItem(_('Flush now'));
         this._flushItem.connect('activate', () => this._flushNow().catch(logUnexpected));
         this._indicator.menu.addMenuItem(this._flushItem);
 
@@ -1223,11 +1223,11 @@ export default class TrueUsbProgressExtension extends Extension {
 
             let state;
             if (st.deltaBytesThisTick > 0)
-                state = 'Writing to the drive…';
+                state = _('Writing to the drive…');
             else if (this._looksComplete(dev, st, this._systemPending))
-                state = 'Finishing up…';
+                state = _('Finishing up…');
             else
-                state = 'Data cached in memory, waiting for the kernel to write it';
+                state = _('Data cached in memory, waiting for the kernel to write it');
 
             active.push({
                 dev,
@@ -1299,7 +1299,7 @@ export default class TrueUsbProgressExtension extends Extension {
             this._panelBar.setFraction(1, BAR_ANIM_MS);
             this._label.text = '100%';
         } else {
-            this._label.text = 'Done';
+            this._label.text = _('Done');
         }
         this._showIndicator();
 
@@ -1342,11 +1342,12 @@ export default class TrueUsbProgressExtension extends Extension {
                 row.bar.actor.show();
                 row.bar.setFraction(a.fraction, duration);
                 row.detail.text = `${Math.floor(a.fraction * 100)}% · ` +
-                    `${formatBytes(a.written)} of ${formatBytes(a.target)} on the drive · ` +
-                    `${a.rate} MB/s`;
+                    // Translators: "1.20 GB of 1.45 GB on the drive"
+                    _('%s of %s on the drive').format(formatBytes(a.written), formatBytes(a.target)) +
+                    ` · ${a.rate} MB/s`;
             } else {
                 row.bar.actor.hide();
-                row.detail.text = `${formatBytes(a.written)} written to the drive · ${a.rate} MB/s`;
+                row.detail.text = `${_('%s written to the drive').format(formatBytes(a.written))} · ${a.rate} MB/s`;
             }
             row.state.text = a.state;
         }
@@ -1399,8 +1400,9 @@ export default class TrueUsbProgressExtension extends Extension {
         this._lastNotifyTime.set(devName, now);
 
         Main.notify(
-            'USB Sync Complete',
-            `Write cache flushed — safe to eject ${driveName}.`,
+            _('USB Sync Complete'),
+            // Translators: %s is the drive name
+            _('Write cache flushed — safe to eject %s.').format(driveName),
         );
     }
 }

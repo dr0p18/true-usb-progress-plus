@@ -1,0 +1,60 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the True USB Write Progress+ package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: True USB Write Progress+\n"
+"Report-Msgid-Bugs-To: https://github.com/dr0p18/true-usb-progress-plus/"
+"issues\n"
+"POT-Creation-Date: 2026-11-03 13:22+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+#: extension.js:459
+msgid "Flush now"
+msgstr ""
+
+#: extension.js:1226
+msgid "Writing to the drive…"
+msgstr ""
+
+#: extension.js:1228
+msgid "Finishing up…"
+msgstr ""
+
+#: extension.js:1230
+msgid "Data cached in memory, waiting for the kernel to write it"
+msgstr ""
+
+#: extension.js:1302
+msgid "Done"
+msgstr ""
+
+#. Translators: "1.20 GB of 1.45 GB on the drive"
+#: extension.js:1346
+#, javascript-format
+msgid "%s of %s on the drive"
+msgstr ""
+
+#: extension.js:1350
+#, javascript-format
+msgid "%s written to the drive"
+msgstr ""
+
+#: extension.js:1403
+msgid "USB Sync Complete"
+msgstr ""
+
+#. Translators: %s is the drive name
+#: extension.js:1405
+#, javascript-format
+msgid "Write cache flushed — safe to eject %s."
+msgstr ""

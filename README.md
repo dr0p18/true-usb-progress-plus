@@ -63,10 +63,9 @@ Uses ESM imports (`gi://`). No legacy `imports.gi` compatibility.
 git clone https://github.com/dr0p18/true-usb-progress-plus.git
 cd true-usb-progress-plus
 
-mkdir -p ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io
-
-cp extension.js metadata.json stylesheet.css \
-   ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io/
+# Builds the zip (compiling the translations in po/) and installs it
+gnome-extensions pack --force --podir=po .
+gnome-extensions install --force true-usb-progress-plus@dr0p18.github.io.shell-extension.zip
 
 # Restart GNOME Shell (X11: Alt+F2, type 'r', Enter)
 # On Wayland: log out and log back in
@@ -254,6 +253,7 @@ true-usb-progress-plus@dr0p18.github.io/
   extension.js    -- Extension logic (single-file)
   stylesheet.css  -- Panel item, progress bars and menu rows
   metadata.json   -- GNOME Shell extension manifest
+  po/             -- Translations (.pot template + one .po per language)
 ```
 
 ## Dependencies
@@ -284,6 +284,26 @@ journalctl -f -o cat /usr/bin/gnome-shell
 ```
 
 Errors are logged with the prefix `[TrueUsbProgress]`.
+
+## Translations
+
+The interface is in English and translatable with gettext; an Italian
+translation is included. To add a language:
+
+```bash
+# refresh the template after changing strings in extension.js
+xgettext --from-code=UTF-8 --language=JavaScript --keyword=_ \
+    --add-comments=Translators -o po/true-usb-progress-plus.pot extension.js
+msginit -i po/true-usb-progress-plus.pot -o po/<lang>.po -l <lang>
+```
+
+Then translate `po/<lang>.po` and open a pull request.
+
+## Support
+
+If this fork is useful to you, you can support its maintainer on
+[Ko-fi](https://ko-fi.com/jacopoleonardi), and the original author via
+[GitHub Sponsors](https://github.com/sponsors/ktauchathuranga).
 
 ## License
 
