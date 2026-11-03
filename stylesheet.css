@@ -1,0 +1,58 @@
+/* True USB Write Progress+ */
+
+/* Tabular digits: changing numbers keep their width, so the panel
+ * item doesn't shift while the copy progresses. */
+.tup-panel-label {
+    margin-left: 6px;
+    font-weight: bold;
+    font-feature-settings: "tnum";
+}
+
+.tup-bar {
+    border-radius: 3px;
+    background-color: rgba(128, 128, 128, 0.35);
+}
+
+.tup-bar-panel {
+    height: 6px;
+    margin-left: 6px;
+}
+
+.tup-bar-menu {
+    height: 6px;
+    margin: 6px 0;
+}
+
+.tup-bar-fill {
+    height: 6px;
+    border-radius: 3px;
+    background-color: #3584e4;
+}
+
+/* GNOME 47+: follow the system accent colour. */
+.tup-bar-fill.tup-accent {
+    background-color: -st-accent-color;
+}
+
+.tup-bar-fill.tup-done {
+    background-color: #2ec27e;
+}
+
+.tup-row {
+    min-width: 240px;
+}
+
+.tup-row-title {
+    font-weight: bold;
+}
+
+.tup-row-detail {
+    font-size: 0.9em;
+    font-feature-settings: "tnum";
+}
+
+.tup-row-state {
+    font-size: 0.9em;
+    color: rgba(128, 128, 128, 1);
+    padding-top: 2px;
+}

@@ -10,6 +10,12 @@
 > display when the target size can't be determined (e.g. files written into
 > a folder that already existed on the drive, which is not watched).
 >
+> It also adds: a compact panel item (icon, bar, percentage) with a details
+> menu and a **Flush now** action; a stricter "safe to eject" decision that
+> waits until the data is really on the device; support for LUKS-encrypted
+> drives; and an indicator that appears as soon as a copy starts, while the
+> data is still only in the page cache.
+>
 > Other fork changes: mount/unmount is detected via `PropertiesChanged`
 > (the original only reacted to interfaces being added/removed), per-partition
 > stats are read from `/sys/class/block/<part>/stat`, bytes are only counted
@@ -59,7 +65,7 @@ cd true-usb-progress-plus
 
 mkdir -p ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io
 
-cp extension.js metadata.json \
+cp extension.js metadata.json stylesheet.css \
    ~/.local/share/gnome-shell/extensions/true-usb-progress-plus@dr0p18.github.io/
 
 # Restart GNOME Shell (X11: Alt+F2, type 'r', Enter)
@@ -83,7 +89,7 @@ gnome-extensions info true-usb-progress-plus@dr0p18.github.io
 |                     |       |  (kernel block-layer I/O)  |
 +--------+------------+       +-------------+--------------+
          |                                  |
-         | GetManagedObjects                | readFileSync()
+         | GetManagedObjects                | async read   
          | InterfacesAdded/Removed          | every 2 seconds
          | (+ Filesystem.MountPoints)        |
          |                                  |
@@ -114,7 +120,7 @@ gnome-extensions info true-usb-progress-plus@dr0p18.github.io
 
 The extension connects to the system bus and calls `GetManagedObjects` on `org.freedesktop.UDisks2` to enumerate all block devices. It filters for devices where:
 
-1. The parent `Drive` interface has `Removable == true` and `ConnectionBus == "usb"`
+1. The parent `Drive` interface has `Removable == true` and `ConnectionBus == "usb"`. Fork addition: an unlocked LUKS volume (`dm-N`) has no `Drive` of its own, so its `CryptoBackingDevice` is followed to the physical drive. LVM on top of LUKS is not resolved yet.
 2. The block device exposes an `org.freedesktop.UDisks2.Filesystem` interface (i.e., it is mounted)
 
 It subscribes to `InterfacesAdded` and `InterfacesRemoved` signals to dynamically track USB hotplug and mount/unmount events without polling D-Bus.
@@ -156,6 +162,8 @@ Both conditions must be met simultaneously to start tracking a write burst:
 
 Small, frequent writes typical of filesystem metadata will not pass these thresholds.
 
+Fork addition: a burst also starts as soon as files being copied to the drive add up to 4 MB, before the kernel has written anything, so the indicator is visible while the data is still only cached in memory. Sparse or preallocated files are counted by their allocated size.
+
 **Phase 2 -- SUSTAIN (permissive)**
 
 Once triggered, any write activity (even small sector changes or in-flight I/O) keeps the indicator alive. This prevents the indicator from flickering off during gaps between kernel writeback rounds.
@@ -163,6 +171,8 @@ Once triggered, any write activity (even small sector changes or in-flight I/O) 
 **DONE (idle detection)**
 
 The burst ends only after 5 consecutive idle ticks (10 seconds) with zero sector changes and zero in-flight I/O. This generous grace period accounts for the bursty nature of Linux's writeback mechanism. Fork addition: at this point the device's tracked target files are also reset, so the next transfer starts fresh.
+
+Fork change: an idle device is not enough. Linux can keep a copy in the page cache, untouched, for up to `vm.dirty_expire_centisecs` (30 s by default), with the device completely idle meanwhile. DONE therefore also requires that the bytes flushed in this burst reached the target size (when known) **and** that the whole system has at most 64 MB of `Dirty` + `Writeback` data left (`/proc/meminfo`). Failing that, DONE is declared once the device has been idle for `dirty_expire + dirty_writeback` + 6 s, read from `/proc/sys/vm`; with `dirty_writeback_centisecs = 0` (periodic writeback disabled) there is no such timeout. DONE is also never declared while a tracked file is still growing.
 
 ```
               +------------------+
@@ -194,19 +204,20 @@ The burst ends only after 5 consecutive idle ticks (10 seconds) with zero sector
               +------------------+
 ```
 
-**Indicator (Top Bar)**
+**Indicator (Top Bar)** — fork rework
 
-A `PanelMenu.Button` with a USB drive icon and a dynamic label. Hidden when no writes are active. When one or more devices are writing, the label shows:
+A `PanelMenu.Button`, hidden when no writes are active (it fades in and out). The panel item stays compact:
 
 ```
-DEVICE_LABEL: 42% · 123.4/294.0 MB (5.2 MB/s) · DEVICE_2: 45.0 MB
+[USB icon] [=====-----]  42%
 ```
 
-- Percentage and a small graphical bar when the target size is known (fork addition)
-- Total bytes written in the current burst, and target size when known
-- Live write speed (updated each tick when new data arrives)
-- Multiple active devices are separated by ` · `
-- Speed display is suppressed when a device is in a writeback gap (shows only total)
+- With a known target size: a progress bar and the combined percentage of all active devices; otherwise the bytes flushed so far (`1480 MB`).
+- Tabular digits, padded with figure spaces, so the item doesn't shift as numbers change.
+- The bar glides to each new value over 1.5 s at constant speed, so small steps move slowly and big writeback bursts move fast.
+- When a burst is DONE: a check mark and a full green bar for 3.5 s, then it fades out.
+
+Clicking it opens a menu with one row per active device (name, bar, `1.20 GB of 1.45 GB on the drive · 35.0 MB/s`, and the current state: *Writing to the drive…*, *Data cached in memory, waiting for the kernel to write it*, *Finishing up…*), plus **Flush now**, which runs `sync -f <mount point>` (`syncfs()`, no root needed) to write the cached data immediately instead of waiting for the kernel.
 
 **Notifications**
 
@@ -230,13 +241,18 @@ The extension currently has no user-configurable settings (no GSettings schema).
 | `IDLE_TICKS_BEFORE_DONE`    | `5`       | Consecutive idle ticks before declaring DONE          |
 | `MAX_WATCHED_DIRS_PER_DEVICE` | `32`  | Fork addition: max directories watched per device    |
 | `TARGET_STALE_MS`           | `120000`  | Fork addition: forget tracked files if no burst starts within this time |
-| `BAR_WIDTH_PX`               | `80`      | Fork addition: fixed width of the graphical progress bar |
+| `TARGET_TRIGGER_BYTES`      | `4 MB`    | Fork addition: copied data that starts a burst before any device write |
+| `SYSTEM_PENDING_SAFE_BYTES` | `64 MB`   | Fork addition: max system-wide Dirty + Writeback for DONE |
+| `OPEN_FILE_ACTIVE_MS`       | `15000`   | Fork addition: a tracked file that grew this recently blocks DONE |
+| `PANEL_BAR_WIDTH_PX`        | `64`      | Fork addition: width of the panel progress bar       |
+| `BAR_ANIM_MS`               | `1500`    | Fork addition: duration of each bar movement         |
 
 ## File Structure
 
 ```
 true-usb-progress-plus@dr0p18.github.io/
   extension.js    -- Extension logic (single-file)
+  stylesheet.css  -- Panel item, progress bars and menu rows
   metadata.json   -- GNOME Shell extension manifest
 ```
 
@@ -256,7 +272,7 @@ true-usb-progress-plus@dr0p18.github.io/
 5. Each tick: reads `/sys/class/block/<dev>/stat` for every tracked device, computes sector deltas
 6. Per-device state machine filters metadata writes and tracks real file copy bursts
 7. Top-bar indicator shows live progress (with percentage/bar when target size is known); hides when idle
-8. Desktop notification fires when all pending writes are flushed
+8. Desktop notification fires when the device's data is known to be flushed
 9. On `disable()`, all timers, signal subscriptions, file monitors, and UI elements are cleaned up
 
 ## Debugging
@@ -267,11 +283,7 @@ Monitor extension logs in real time:
 journalctl -f -o cat /usr/bin/gnome-shell
 ```
 
-Look for log lines prefixed with `[TrueUsbProgress]`:
-
-```
-[TrueUsbProgress] Tracking USB device: /dev/sdb1 ("MY_USB") mount=/run/media/user/MY_USB
-```
+Errors are logged with the prefix `[TrueUsbProgress]`.
 
 ## License
 
