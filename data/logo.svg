@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#deddda"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Tile, with the soft bottom edge of GNOME app icons -->
+  <rect x="32" y="44" width="448" height="448" rx="96" fill="#1a5fb4"/>
+  <rect x="32" y="32" width="448" height="448" rx="96" fill="url(#tile)"/>
+
+  <!-- USB connector -->
+  <rect x="200" y="84" width="112" height="84" rx="10" fill="#c0bfbc"/>
+  <rect x="226" y="108" width="22" height="22" rx="4" fill="#77767b"/>
+  <rect x="264" y="108" width="22" height="22" rx="4" fill="#77767b"/>
+
+  <!-- Drive body -->
+  <rect x="172" y="160" width="168" height="212" rx="30" fill="url(#body)"/>
+  <!-- Activity light -->
+  <circle cx="256" cy="204" r="12" fill="#33d17a"/>
+
+  <!-- Progress bar: track + fill (≈70%) -->
+  <rect x="104" y="404" width="304" height="36" rx="18" fill="#0b3a75" fill-opacity="0.55"/>
+  <rect x="104" y="404" width="214" height="36" rx="18" fill="#ffffff"/>
+</svg>

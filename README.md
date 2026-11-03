@@ -1,4 +1,10 @@
+<p align="center"><img src="data/logo-128.png" width="96" alt=""></p>
+
 # True USB Write Progress+
+
+![Panel indicator and menu while the kernel still holds the copy in memory](data/screenshots/menu-waiting.png)
+
+![Done: check mark, full bar and "safe to eject" notification](data/screenshots/done-notification.png)
 
 > **This is a fork** of [true-usb-progress](https://github.com/ktauchathuranga/true-usb-progress)
 > by [Ashen Chathuranga](https://github.com/ktauchathuranga).
