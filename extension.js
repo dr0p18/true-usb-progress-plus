@@ -331,6 +331,13 @@ class ProgressBar {
         else
             this._fill.remove_style_class_name('tup-done');
     }
+
+    destroy() {
+        this._fill?.destroy();
+        this.actor?.destroy();
+        this._fill = null;
+        this.actor = null;
+    }
 }
 
 // ─── Main Extension Class ─────────────────────────────────────────────────────
@@ -467,7 +474,12 @@ export default class TrueUsbProgressExtension extends Extension {
     }
 
     _destroyIndicator() {
-        // Children (and the menu) are destroyed together with the indicator.
+        this._removeMenuRows();
+        this._flushItem?.destroy();
+        this._rowsSection?.destroy();
+        this._panelBar?.destroy();
+        this._icon?.destroy();
+        this._label?.destroy();
         this._indicator?.destroy();
         this._indicator   = null;
         this._icon        = null;
@@ -1354,6 +1366,7 @@ export default class TrueUsbProgressExtension extends Extension {
 
         for (const [dev, row] of [...this._menuRows]) {
             if (!seen.has(dev)) {
+                row.bar.destroy();
                 row.item.destroy();
                 this._menuRows.delete(dev);
             }
@@ -1382,8 +1395,11 @@ export default class TrueUsbProgressExtension extends Extension {
     }
 
     _removeMenuRows() {
-        for (const row of this._menuRows.values())
+        if (!this._menuRows) return;
+        for (const row of this._menuRows.values()) {
+            row.bar.destroy();
             row.item.destroy();
+        }
         this._menuRows.clear();
     }
 
